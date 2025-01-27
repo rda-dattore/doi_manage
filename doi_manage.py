@@ -9,9 +9,9 @@ import local_doi_manage_settings as settings
 
 from lxml import etree as ElementTree
 
-from dbutils import uncompress_bitmap_values
-from metautils import export_to_datacite
-from unixutils import make_tempdir, remove_tempdir, sendmail
+from libpkg.dbutils import uncompress_bitmap_values
+from libpkg.metautils import export_to_datacite
+from libpkg.unixutils import make_tempdir, remove_tempdir, sendmail
 
 
 DEBUG = False
@@ -35,22 +35,23 @@ def open_dataset_overview(dsid):
     return ElementTree.fromstring(resp.text)
 
 
-def do_url_registration(doi, url, config, tdir):
-    regfile = os.path.join(tdir, config['identifier'] + ".reg")
+def do_url_registration(doi, dsid, api_config, tdir):
+    regfile = os.path.join(tdir, dsid + ".reg")
+    url = "https://rda.ucar.edu/datasets/{}/".format(dsid);
     with open(regfile, "w") as f:
         f.write("doi=" + doi + "\n")
         f.write("url=" + url + "\n")
 
     f.close()
     # register the URL
-    proc = subprocess.run("curl -s --user {user}:{password} -H 'Content-type: text/plain;charset=UTF-8' -X PUT --data-binary @{regfile} https://{host}/doi/{doi}".format(**config['api_config'], doi=doi, regfile=regfile), shell=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    proc = subprocess.run("curl -s --user {user}:{password} -H 'Content-type: text/plain;charset=UTF-8' -X PUT --data-binary @{regfile} https://{host}/doi/{doi}".format(**api_config, doi=doi, regfile=regfile), shell=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
     err = proc.stderr.decode("utf-8")
     if len(err) > 0:
         sendmail(
             settings.notifications['error'],
             "rdadoi@ucar.edu",
             "DOI Error",
-            "Error while registering the DOI URL for '{}': '{}'".format(doi, err),
+            "Error while registering the URL for DOI/dsid: '{}/{}': '{}'".format(doi, config['identifier'], err),
             devel=DEBUG
         )
 
@@ -60,19 +61,19 @@ def do_url_registration(doi, url, config, tdir):
             settings.notifications['error'],
             "rdadoi@ucar.edu",
             "DOI Error",
-            "Unexpected response while registering the DOI URL for '{}': '{}'".format(doi, out),
+            "Unexpected response while registering the URL for DOI/dsid: '{}/{}': '{}'".format(doi, dsid, out),
             devel=DEBUG
         )
 
     # verify the registration
-    proc = subprocess.run("curl -s --user {user}:{password} https://{host}/doi/{doi}".format(**config['api_config'], doi=doi), shell=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    proc = subprocess.run("curl -s --user {user}:{password} https://{host}/doi/{doi}".format(**api_config, doi=doi), shell=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
     err = proc.stderr.decode("utf-8")
     if len(err) > 0:
         sendmail(
             settings.notifications['error'],
             "rdadoi@ucar.edu",
             "DOI Error",
-            "Error while retrieving the registered URL for DOI: '{}': '{}'".format(doi, err),
+            "Error while retrieving the registered URL for DOI/dsid: '{}/{}': '{}'".format(doi, dsid, err),
             devel=DEBUG
         )
 
@@ -82,7 +83,7 @@ def do_url_registration(doi, url, config, tdir):
             settings.notifications['error'],
             "rdadoi@ucar.edu",
             "DOI Error",
-            "Unexpected response while retrieving the registered URL for DOI: '{}': '{}'".format(doi, out),
+            "Unexpected response while retrieving the registered URL for DOI/dsid: '{}/{}': '{}'".format(doi, dsid, out),
             devel=DEBUG
         )
 
@@ -134,14 +135,12 @@ def create_doi(config):
             f.write(dc)
 
         f.close()
-        print("curl -s --user {user}:{password} -H 'Content-type: application/xml;charset=UTF-8' -X PUT -d@{dcfile} https://{host}/metadata/{doi_prefix}".format(**config['api_config'], dcfile=dcfile))
-        #err = o.stderr.decode("utf-8")
-        err = ""
+        proc = subprocess.run("curl -s --user {user}:{password} -H 'Content-type: application/xml;charset=UTF-8' -X PUT -d@{dcfile} https://{host}/metadata/{doi_prefix}".format(**config['api_config'], dcfile=dcfile), shell=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        err = proc.stderr.decode("utf-8")
         if len(err) > 0:
             raise RuntimeError("error while creating DOI: '{}'".format(err))
 
-        #out = o.stdout.decode("utf-8")
-        out = "OK (10.70115/2Q6N-VX50)"
+        out = proc.stdout.decode("utf-8")
         parts = out.split()
         if len(parts) != 2 or parts[0] != "OK":
             raise RuntimeError("unexpected response while creating DOI: '{}'".format(out))
@@ -151,7 +150,7 @@ def create_doi(config):
 
         # register the dereferencing URL for the DOI
         time.sleep(5)
-        do_url_registration(doi, "https://rda.ucar.edu/datasets/" + config['identifier'] + "/", config, tdir)
+        do_url_registration(doi, config['identifier'], config['api_config'], tdir)
         if config['api_config']['caller'] == "operations":
             out.append("View the DOI at https://commons.datacite.org/?query=" + doi)
 
