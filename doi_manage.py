@@ -99,24 +99,15 @@ def create_doi(config):
             raise RuntimeError("failed test run: '{}'".format(warn))
 
     try:
-        metadb_conn = psycopg2.connect(**settings.metadb_config)
-        metadb_cursor = metadb_conn.cursor()
+        conn = psycopg2.connect(**settings.metadb_config)
+        cursor = conn.cursor()
     except psycopg2.Error as err:
         raise RuntimeError("metadata database connection error: '{}'".format(err))
 
     try:
-        wagtaildb_conn = psycopg2.connect(**settings.wagtaildb_config)
-        wagtaildb_cursor = wagtaildb_conn.cursor()
-    except psycopg2.Error as err:
-        raise RuntimeError("wagtail database connection error: '{}'".format(err))
-
-    tdir = make_tempdir("/tmp")
-    if len(tdir) == 0:
-        raise FileNotFoundError("unable to create a temporary directory")
-
-    try:
-        metadb_cursor.execute("select type from search.datasets where dsid = %s", (config['identifier'], ))
-        res = metadb_cursor.fetchone()
+        cursor.execute("select type from search.datasets where dsid = %s", (config['identifier'], ))
+        res = cursor.fetchone()
+        conn.close()
     except psycopg2.Error as err:
         raise RuntimeError("metadata database error: '{}'".format(err))
     else:
@@ -126,9 +117,13 @@ def create_doi(config):
         if res[0] not in ("P", "H"):
             raise RuntimeError("a DOI can only be assigned to a dataset typed as 'primary' or 'historical'")
 
-        dc, warn = export_to_datacite_4(config['identifier'], metadb_cursor, wagtaildb_cursor)
+        dc, warn = export_to_datacite_4(config['identifier'], settings.metadb_config, settings.wagtaildb_config)
 
         # mint the DOI and send the associated metadata
+        tdir = make_tempdir("/tmp")
+        if len(tdir) == 0:
+            raise FileNotFoundError("unable to create a temporary directory")
+
         dcfile = os.path.join(tdir, config['identifier'] + ".dc4")
         with open(dcfile, "w") as f:
             f.write(dc)
@@ -155,8 +150,6 @@ def create_doi(config):
 
     finally:
         remove_tempdir(tdir)
-        metadb_conn.close()
-        wagtaildb_conn.close()
 
     return ("\n".join(out), warn)
 
@@ -168,25 +161,13 @@ def update_doi(config, **kwargs):
 
     doi = parts[0]
     dsid = parts[1]
-    try:
-        metadb_conn = psycopg2.connect(**settings.metadb_config)
-        metadb_cursor = metadb_conn.cursor()
-    except psycopg2.Error as err:
-        raise RuntimeError("metadata database connection error: '{}'".format(err))
-
-    try:
-        wagtaildb_conn = psycopg2.connect(**settings.wagtaildb_config)
-        wagtaildb_cursor = wagtaildb_conn.cursor()
-    except psycopg2.Error as err:
-        raise RuntimeError("wagtail database connection error: '{}'".format(err))
-
     tdir = make_tempdir("/tmp")
     if len(tdir) == 0:
         raise FileNotFoundError("unable to create a temporary directory")
 
     try:
         retire = True if 'retire' in kwargs and kwargs['retire'] else False
-        dc, warn = export_to_datacite_4(dsid, metadb_cursor, wagtaildb_cursor, mandatoryOnly=retire)
+        dc, warn = export_to_datacite_4(dsid, settings.metadb_config, settings.wagtaildb_config, mandatoryOnly=retire)
         # validate the DataCite XML before sending it
         root = ElementTree.fromstring(dc).find(".")
         schema_parts = root.get("{http://www.w3.org/2001/XMLSchema-instance}schemaLocation").split()
@@ -226,8 +207,6 @@ def update_doi(config, **kwargs):
 
     finally:
         remove_tempdir(tdir)
-        metadb_conn.close()
-        wagtaildb_conn.close()
 
     return warn
 
