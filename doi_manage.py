@@ -10,7 +10,7 @@ import local_doi_manage_settings as settings
 from lxml import etree as ElementTree
 
 from libpkg.dbutils import uncompress_bitmap_values
-from libpkg.metautils import export_to_datacite
+from libpkg.metautils import export_to_datacite_4
 from libpkg.unixutils import make_tempdir, remove_tempdir, sendmail
 
 
@@ -35,9 +35,12 @@ def open_dataset_overview(dsid):
     return ElementTree.fromstring(resp.text)
 
 
-def do_url_registration(doi, dsid, api_config, tdir):
+def do_url_registration(doi, dsid, api_config, tdir, **kwargs):
     regfile = os.path.join(tdir, dsid + ".reg")
-    url = "https://rda.ucar.edu/datasets/{}/".format(dsid);
+    if 'retire' in kwargs and kwargs['retire']:
+        url = "https://rda.ucar.edu/doi/{}/".format(doi);
+    else:
+        url = "https://rda.ucar.edu/datasets/{}/".format(dsid);
     with open(regfile, "w") as f:
         f.write("doi=" + doi + "\n")
         f.write("url=" + url + "\n")
@@ -133,7 +136,7 @@ def create_doi(config):
             raise RuntimeError("a DOI can only be assigned to a dataset typed as 'primary' or 'historical'")
 
         root = open_dataset_overview(config['identifier'])
-        dc, warn = export_to_datacite(config['identifier'], root, metadb_cursor, wagtaildb_cursor)
+        dc, warn = export_to_datacite_4(config['identifier'], root, metadb_cursor, wagtaildb_cursor)
 
         # mint the DOI and send the associated metadata
         dcfile = os.path.join(tdir, config['identifier'] + ".dc4")
@@ -168,7 +171,7 @@ def create_doi(config):
     return ("\n".join(out), warn)
 
 
-def update_doi(config, **kwargs);
+def update_doi(config, **kwargs):
     try:
         metadb_conn = psycopg2.connect(**settings.metadb_config)
     except psycopg2.Error as err:
@@ -200,8 +203,10 @@ def update_doi(config, **kwargs);
             elif e[0] != dsid:
                 raise RuntimeError("This DOI is associated with multiple datasets - there is a problem with the database")
 
+        retire = True if 'retire' in kwargs and kwargs['retire'] else False
         root = open_dataset_overview(dsid)
-        dc, warn = export_to_datacite(dsid, root, metadb_cursor, wagtaildb_cursor)
+        dc, warn = export_to_datacite_4(dsid, root, metadb_cursor, wagtaildb_cursor, mandatoryOnly=retire)
+        print(dc)
         # validate the DataCite XML before sending it
         dc_root = ElementTree.fromstring(dc).find(".")
         schema_parts = dc_root.get("{http://www.w3.org/2001/XMLSchema-instance}schemaLocation").split()
@@ -236,7 +241,8 @@ def update_doi(config, **kwargs);
                 devel=DEBUG
             )
             raise RuntimeError(err)
-            do_url_registration(config['identifier'], dsid, config['api_config'], tdir)
+
+        do_url_registration(config['identifier'], dsid, config['api_config'], tdir, retire=retire)
 
     finally:
         remove_tempdir(tdir)
