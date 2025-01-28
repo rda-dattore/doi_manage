@@ -257,14 +257,14 @@ if __name__ == "__main__":
         print((
             "usage: {} <authorization_key> [options...] <mode> <identifier>".format(sys.argv[0][sys.argv[0].rfind("/")+1:]) + "\n"
             "\nmode (must be one of the following):\n"
-            "    create <dnnnnnn>   register a new DOI for dataset dnnnnnn\n"
-            "    update <DOI>       update the DataCite metadata for an existing DOI\n"
-            "    supersede <DOI>    mark the DOI as being superseded by another DOI\n"
-            "    terminate <DOI>    mark the DOI as 'dead'\n"
+            "    create <dnnnnnn>   mint and register a new DOI for dataset dnnnnnn\n"
+            "    update <DOI>       update the DataCite metadata and URL registration for an\n"
+            "                       existing DOI\n"
+            "    terminate <DOI>    terminate the DOI and update the URL registration to\n"
+            "                       point to a 'dead' landing page\n"
             "\noptions:\n"
             "    --debug  show stack trace for an exception\n"
             "    -t       run in test mode\n"
-            "    -v3      push DataCite version 3 metadata\n"
         ))
         sys.exit(1)
 
@@ -287,18 +287,13 @@ if __name__ == "__main__":
     else:
         config.update({'api_config': settings.operations_api_config})
 
-    if "-v3" in args:
-        config.update({'datacite_version': "3"})
-    else:
-        config.update({'datacite_version': settings.default_datacite_version})
-
     if mode == "create":
         out, warn = create_doi(config)
     elif mode == "update":
         # REMOVE AFTER TESTING!
         config['api_config'] = settings.real_operations_api_config
         warn = update_doi(config, retire=False)
-    elif mode in ("supersede", "terminate"):
+    elif mode == "terminate":
         warn = update_doi(config, retire=True)
     else:
         raise ValueError("invalid mode")
