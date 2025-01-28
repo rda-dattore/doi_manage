@@ -1,6 +1,5 @@
 import os
 import psycopg2
-import requests
 import subprocess
 import sys
 import time
@@ -25,14 +24,6 @@ def on_crash(exctype, value, traceback):
 
 
 sys.excepthook = on_crash
-
-
-def open_dataset_overview(dsid):
-    resp = requests.get("https://rda.ucar.edu/datasets/" + dsid + "/metadata/dsOverview.xml")
-    if resp.status_code != 200:
-        raise RuntimeError("unable to download dataset overview: status code: {}".format(resp.status_code))
-
-    return ElementTree.fromstring(resp.text)
 
 
 def do_url_registration(doi, dsid, api_config, tdir, **kwargs):
@@ -109,11 +100,13 @@ def create_doi(config):
 
     try:
         metadb_conn = psycopg2.connect(**settings.metadb_config)
+        metadb_cursor = metadb_conn.cursor()
     except psycopg2.Error as err:
         raise RuntimeError("metadata database connection error: '{}'".format(err))
 
     try:
         wagtaildb_conn = psycopg2.connect(**settings.wagtaildb_config)
+        wagtaildb_cursor = wagtaildb_conn.cursor()
     except psycopg2.Error as err:
         raise RuntimeError("wagtail database connection error: '{}'".format(err))
 
@@ -122,8 +115,6 @@ def create_doi(config):
         raise FileNotFoundError("unable to create a temporary directory")
 
     try:
-        metadb_cursor = metadb_conn.cursor()
-        wagtaildb_cursor = wagtaildb_conn.cursor()
         metadb_cursor.execute("select type from search.datasets where dsid = %s", (config['identifier'], ))
         res = metadb_cursor.fetchone()
     except psycopg2.Error as err:
@@ -135,8 +126,7 @@ def create_doi(config):
         if res[0] not in ("P", "H"):
             raise RuntimeError("a DOI can only be assigned to a dataset typed as 'primary' or 'historical'")
 
-        root = open_dataset_overview(config['identifier'])
-        dc, warn = export_to_datacite_4(config['identifier'], root, metadb_cursor, wagtaildb_cursor)
+        dc, warn = export_to_datacite_4(config['identifier'], metadb_cursor, wagtaildb_cursor)
 
         # mint the DOI and send the associated metadata
         dcfile = os.path.join(tdir, config['identifier'] + ".dc4")
@@ -172,13 +162,21 @@ def create_doi(config):
 
 
 def update_doi(config, **kwargs):
+    parts = config['identifier'].split("==")
+    if len(parts) != 2:
+        raise RuntimeError("invalid relation '{}'".format(config['identifier']))
+
+    doi = parts[0]
+    dsid = parts[1]
     try:
         metadb_conn = psycopg2.connect(**settings.metadb_config)
+        metadb_cursor = metadb_conn.cursor()
     except psycopg2.Error as err:
         raise RuntimeError("metadata database connection error: '{}'".format(err))
 
     try:
         wagtaildb_conn = psycopg2.connect(**settings.wagtaildb_config)
+        wagtaildb_cursor = wagtaildb_conn.cursor()
     except psycopg2.Error as err:
         raise RuntimeError("wagtail database connection error: '{}'".format(err))
 
@@ -187,41 +185,23 @@ def update_doi(config, **kwargs):
         raise FileNotFoundError("unable to create a temporary directory")
 
     try:
-        metadb_cursor = metadb_conn.cursor()
-        wagtaildb_cursor = wagtaildb_conn.cursor()
-        metadb_cursor.execute("select dsid from dssdb.dsvrsn where doi = %s", (config['identifier'], ))
-        res = metadb_cursor.fetchall()
-    except psycopg2.Error as err:
-        raise RuntimeError("metadata database error: '{}'".format(err))
-    else:
-        if len(res) == 0:
-            raise RuntimeError("DOI not found in RDADB - make sure you specified the DOI correctly")
-
-        for e in res:
-            if 'dsid' not in locals():
-                dsid = e[0]
-            elif e[0] != dsid:
-                raise RuntimeError("This DOI is associated with multiple datasets - there is a problem with the database")
-
         retire = True if 'retire' in kwargs and kwargs['retire'] else False
-        root = open_dataset_overview(dsid)
-        dc, warn = export_to_datacite_4(dsid, root, metadb_cursor, wagtaildb_cursor, mandatoryOnly=retire)
-        print(dc)
+        dc, warn = export_to_datacite_4(dsid, metadb_cursor, wagtaildb_cursor, mandatoryOnly=retire)
         # validate the DataCite XML before sending it
-        dc_root = ElementTree.fromstring(dc).find(".")
-        schema_parts = dc_root.get("{http://www.w3.org/2001/XMLSchema-instance}schemaLocation").split()
+        root = ElementTree.fromstring(dc).find(".")
+        schema_parts = root.get("{http://www.w3.org/2001/XMLSchema-instance}schemaLocation").split()
         xml_schema = ElementTree.XMLSchema(ElementTree.parse(schema_parts[-1]))
-        xml_schema.assertValid(dc_root)
+        xml_schema.assertValid(root)
         dcfile = os.path.join(tdir, dsid + ".dc4")
         with open(dcfile, "w") as f:
             f.write(dc)
 
         f.close()
         # send the XML to DataCite
-        proc = subprocess.run("curl -s --user {user}:{password} -H 'Content-type: application/xml;charset=UTF-8' -X PUT -d@{dcfile} https://{host}/metadata/{doi}".format(**config['api_config'], dcfile=dcfile, doi=config['identifier']), shell=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        proc = subprocess.run("curl -s --user {user}:{password} -H 'Content-type: application/xml;charset=UTF-8' -X PUT -d@{dcfile} https://{host}/metadata/{doi}".format(**config['api_config'], dcfile=dcfile, doi=doi), shell=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
         err = proc.stderr.decode("utf-8")
         if len(err) > 0:
-            err = "Error sending metadata for DOI: '{}': '{}'".format(config['identifier'], err)
+            err = "Error sending metadata for DOI: '{}': '{}'".format(doi, err)
             sendmail(
                 settings.notifications['error'],
                 "rdadoi@ucar.edu",
@@ -232,7 +212,7 @@ def update_doi(config, **kwargs):
             raise RuntimeError(err)
         out = proc.stdout.decode("utf-8")
         if out.find("OK") != 0:
-            err = "Unexpected response while sending metadata for DOI: '{}': '{}'".format(config['identifier'], out)
+            err = "Unexpected response while sending metadata for DOI: '{}': '{}'".format(doi, out)
             sendmail(
                 settings.notifications['error'],
                 "rdadoi@ucar.edu",
@@ -242,7 +222,7 @@ def update_doi(config, **kwargs):
             )
             raise RuntimeError(err)
 
-        do_url_registration(config['identifier'], dsid, config['api_config'], tdir, retire=retire)
+        do_url_registration(doi, dsid, config['api_config'], tdir, retire=retire)
 
     finally:
         remove_tempdir(tdir)
@@ -257,11 +237,10 @@ if __name__ == "__main__":
         print((
             "usage: {} <authorization_key> [options...] <mode> <identifier>".format(sys.argv[0][sys.argv[0].rfind("/")+1:]) + "\n"
             "\nmode (must be one of the following):\n"
-            "    create <dnnnnnn>   mint and register a new DOI for dataset dnnnnnn\n"
-            "    update <DOI>       update the DataCite metadata and URL registration for an\n"
-            "                       existing DOI\n"
-            "    terminate <DOI>    terminate the DOI and update the URL registration to\n"
-            "                       point to a 'dead' landing page\n"
+            "    create <dnnnnnn>    mint and register a new DOI for dataset dnnnnnn\n"
+            "    update <relation>   update the <DOI==dsid> relationship for an existing DOI\n"
+            "    terminate <DOI>     terminate the DOI and update the URL registration to\n"
+            "                        point to a 'dead' landing page\n"
             "\noptions:\n"
             "    --debug  show stack trace for an exception\n"
             "    -t       run in test mode\n"
@@ -290,8 +269,6 @@ if __name__ == "__main__":
     if mode == "create":
         out, warn = create_doi(config)
     elif mode == "update":
-        # REMOVE AFTER TESTING!
-        config['api_config'] = settings.real_operations_api_config
         warn = update_doi(config, retire=False)
     elif mode == "terminate":
         warn = update_doi(config, retire=True)
